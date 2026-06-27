@@ -1,0 +1,396 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>坦克大战</title>
+  <style>
+    * { margin: 0; padding: 0; box-sizing: border-box; }
+    body {
+      background: #1a1a1a;
+      color: #fff;
+      font-family: 'Microsoft YaHei', sans-serif;
+      display: flex;
+      flex-direction: column;
+      align-items: center;
+      justify-content: center;
+      min-height: 100vh;
+      user-select: none;
+    }
+    h1 { margin-bottom: 10px; font-size: 28px; letter-spacing: 2px; }
+    #info {
+      display: flex;
+      gap: 30px;
+      margin-bottom: 10px;
+      font-size: 16px;
+    }
+    #info span { color: #0f0; }
+    canvas {
+      border: 3px solid #555;
+      background: #000;
+      box-shadow: 0 0 20px rgba(0,255,0,0.2);
+    }
+    #controls {
+      margin-top: 12px;
+      font-size: 14px;
+      color: #aaa;
+    }
+    #gameOver {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      text-align: center;
+      display: none;
+      background: rgba(0,0,0,0.85);
+      padding: 30px 50px;
+      border: 2px solid #0f0;
+      border-radius: 10px;
+    }
+    #gameOver h2 { font-size: 36px; color: #f00; margin-bottom: 15px; }
+    #gameOver p { font-size: 18px; margin-bottom: 20px; }
+    #gameOver button {
+      padding: 10px 25px;
+      font-size: 16px;
+      background: #0f0;
+      color: #000;
+      border: none;
+      border-radius: 5px;
+      cursor: pointer;
+      font-weight: bold;
+    }
+    #gameOver button:hover { background: #0c0; }
+  </style>
+</head>
+<body>
+  <h1>坦克大战</h1>
+  <div id="info">
+    <div>得分: <span id="score">0</span></div>
+    <div>生命: <span id="lives">3</span></div>
+    <div>关卡: <span id="level">1</span></div>
+  </div>
+  <canvas id="game" width="800" height="600"></canvas>
+  <div id="controls">
+    WASD / 方向键移动 · 空格射击 · 消灭所有敌方坦克进入下一关
+  </div>
+  <div id="gameOver">
+    <h2>游戏结束</h2>
+    <p>最终得分: <span id="finalScore">0</span></p>
+    <button onclick="game.restart()">重新开始</button>
+  </div>
+
+  <script>
+    const canvas = document.getElementById('game');
+    const ctx = canvas.getContext('2d');
+
+    const TILE = 40;
+    const COLS = canvas.width / TILE;
+    const ROWS = canvas.height / TILE;
+
+    const DIRS = {
+      up: { x: 0, y: -1 },
+      down: { x: 0, y: 1 },
+      left: { x: -1, y: 0 },
+      right: { x: 1, y: 0 }
+    };
+
+    function rectIntersect(a, b) {
+      return a.x < b.x + b.w && a.x + a.w > b.x &&
+             a.y < b.y + b.h && a.y + a.h > b.y;
+    }
+
+    class Bullet {
+      constructor(x, y, dir, owner) {
+        this.x = x;
+        this.y = y;
+        this.dir = dir;
+        this.owner = owner;
+        this.speed = 7;
+        this.size = 6;
+        this.dead = false;
+      }
+      update() {
+        this.x += this.dir.x * this.speed;
+        this.y += this.dir.y * this.speed;
+        if (this.x < 0 || this.x > canvas.width || this.y < 0 || this.y > canvas.height) {
+          this.dead = true;
+        }
+      }
+      draw() {
+        ctx.fillStyle = this.owner === 'player' ? '#ff0' : '#f55';
+        ctx.beginPath();
+        ctx.arc(this.x, this.y, this.size / 2, 0, Math.PI * 2);
+        ctx.fill();
+      }
+      getRect() {
+        return { x: this.x - this.size/2, y: this.y - this.size/2, w: this.size, h: this.size };
+      }
+    }
+
+    class Tank {
+      constructor(x, y, type) {
+        this.x = x;
+        this.y = y;
+        this.w = 34;
+        this.h = 34;
+        this.dir = type === 'player' ? DIRS.up : DIRS.down;
+        this.speed = type === 'player' ? 3 : 1.5;
+        this.type = type;
+        this.color = type === 'player' ? '#0f0' : '#f00';
+        this.cooldown = 0;
+        this.dead = false;
+        this.moveTimer = 0;
+      }
+      getRect() {
+        return { x: this.x, y: this.y, w: this.w, h: this.h };
+      }
+      center() {
+        return { x: this.x + this.w / 2, y: this.y + this.h / 2 };
+      }
+      canMove(dx, dy, walls) {
+        const next = { x: this.x + dx, y: this.y + dy, w: this.w, h: this.h };
+        if (next.x < 0 || next.x + next.w > canvas.width || next.y < 0 || next.y + next.h > canvas.height) return false;
+        for (const w of walls) {
+          if (rectIntersect(next, w)) return false;
+        }
+        return true;
+      }
+      move(dx, dy, walls) {
+        if (dx > 0) this.dir = DIRS.right;
+        if (dx < 0) this.dir = DIRS.left;
+        if (dy > 0) this.dir = DIRS.down;
+        if (dy < 0) this.dir = DIRS.up;
+        if (this.canMove(dx, dy, walls)) {
+          this.x += dx;
+          this.y += dy;
+        }
+      }
+      shoot() {
+        if (this.cooldown > 0) return;
+        this.cooldown = this.type === 'player' ? 20 : 60;
+        const c = this.center();
+        game.bullets.push(new Bullet(c.x + this.dir.x * 22, c.y + this.dir.y * 22, this.dir, this.type));
+      }
+      update(walls) {
+        if (this.cooldown > 0) this.cooldown--;
+        if (this.type === 'enemy') {
+          this.moveTimer--;
+          if (this.moveTimer <= 0) {
+            const keys = Object.keys(DIRS);
+            this.dir = DIRS[keys[Math.floor(Math.random() * keys.length)]];
+            this.moveTimer = 30 + Math.random() * 60;
+          }
+          this.move(this.dir.x * this.speed, this.dir.y * this.speed, walls);
+          if (Math.random() < 0.015) this.shoot();
+        }
+      }
+      draw() {
+        ctx.save();
+        ctx.translate(this.x + this.w/2, this.y + this.h/2);
+        let angle = 0;
+        if (this.dir === DIRS.down) angle = Math.PI;
+        if (this.dir === DIRS.left) angle = -Math.PI/2;
+        if (this.dir === DIRS.right) angle = Math.PI/2;
+        ctx.rotate(angle);
+        ctx.fillStyle = this.color;
+        ctx.fillRect(-this.w/2, -this.h/2, this.w, this.h);
+        ctx.fillStyle = '#000';
+        ctx.fillRect(-6, -this.h/2 - 8, 12, 18);
+        ctx.fillStyle = '#333';
+        ctx.fillRect(-4, 0, 8, 20);
+        ctx.strokeStyle = '#000';
+        ctx.lineWidth = 2;
+        ctx.strokeRect(-this.w/2, -this.h/2, this.w, this.h);
+        ctx.restore();
+      }
+    }
+
+    class Game {
+      constructor() {
+        this.keys = {};
+        this.bullets = [];
+        this.walls = [];
+        this.enemies = [];
+        this.player = null;
+        this.score = 0;
+        this.lives = 3;
+        this.level = 1;
+        this.running = true;
+        this.lastTime = 0;
+        this.enemySpawnTimer = 0;
+        this.maxEnemies = 4;
+        this.bindEvents();
+        this.startLevel();
+        this.loop = this.loop.bind(this);
+        requestAnimationFrame(this.loop);
+      }
+      bindEvents() {
+        window.addEventListener('keydown', e => {
+          this.keys[e.key.toLowerCase()] = true;
+          if (e.key === ' ') this.player?.shoot();
+        });
+        window.addEventListener('keyup', e => this.keys[e.key.toLowerCase()] = false);
+      }
+      buildWalls() {
+        this.walls = [];
+        for (let r = 2; r < ROWS - 2; r += 2) {
+          for (let c = 2; c < COLS - 2; c += 2) {
+            if (Math.random() < 0.4) {
+              this.walls.push({ x: c * TILE, y: r * TILE, w: TILE, h: TILE });
+            }
+          }
+        }
+        const safe = [
+          { x: 0, y: 0, w: 120, h: 120 },
+          { x: canvas.width - 120, y: canvas.height - 120, w: 120, h: 120 }
+        ];
+        this.walls = this.walls.filter(w => !safe.some(s => rectIntersect(w, s)));
+      }
+      isFree(x, y, w, h) {
+        const rect = { x, y, w, h };
+        if (x < 0 || x + w > canvas.width || y < 0 || y + h > canvas.height) return false;
+        for (const wall of this.walls) if (rectIntersect(rect, wall)) return false;
+        for (const e of this.enemies) if (rectIntersect(rect, e.getRect())) return false;
+        if (this.player && rectIntersect(rect, this.player.getRect())) return false;
+        return true;
+      }
+      randomPos() {
+        for (let i = 0; i < 100; i++) {
+          const x = Math.floor(Math.random() * (canvas.width - 60)) + 10;
+          const y = Math.floor(Math.random() * (canvas.height - 60)) + 10;
+          if (this.isFree(x, y, 34, 34)) return { x, y };
+        }
+        return { x: canvas.width - 80, y: canvas.height - 80 };
+      }
+      startLevel() {
+        this.bullets = [];
+        this.enemies = [];
+        this.buildWalls();
+        const p = this.randomPos();
+        this.player = new Tank(p.x, p.y, 'player');
+        for (let i = 0; i < this.maxEnemies; i++) {
+          const pos = this.randomPos();
+          this.enemies.push(new Tank(pos.x, pos.y, 'enemy'));
+        }
+        this.updateUI();
+      }
+      spawnEnemy() {
+        if (this.enemies.length >= this.maxEnemies) return;
+        const pos = this.randomPos();
+        this.enemies.push(new Tank(pos.x, pos.y, 'enemy'));
+      }
+      update() {
+        if (!this.running) return;
+        const p = this.player;
+        let dx = 0, dy = 0;
+        if (this.keys['w'] || this.keys['arrowup']) dy -= p.speed;
+        if (this.keys['s'] || this.keys['arrowdown']) dy += p.speed;
+        if (this.keys['a'] || this.keys['arrowleft']) dx -= p.speed;
+        if (this.keys['d'] || this.keys['arrowright']) dx += p.speed;
+        p.move(dx, dy, this.walls);
+
+        p.update(this.walls);
+        this.enemies.forEach(e => e.update(this.walls));
+
+        this.bullets.forEach(b => b.update());
+        this.bullets = this.bullets.filter(b => !b.dead);
+
+        for (const b of this.bullets) {
+          for (const w of this.walls) {
+            if (rectIntersect(b.getRect(), w)) { b.dead = true; break; }
+          }
+          if (b.dead) continue;
+
+          if (b.owner === 'player') {
+            for (const e of this.enemies) {
+              if (!e.dead && rectIntersect(b.getRect(), e.getRect())) {
+                e.dead = true;
+                b.dead = true;
+                this.score += 100;
+                break;
+              }
+            }
+          } else {
+            if (rectIntersect(b.getRect(), p.getRect())) {
+              b.dead = true;
+              this.lives--;
+              if (this.lives <= 0) {
+                this.gameOver();
+                return;
+              }
+            }
+          }
+        }
+
+        this.enemies = this.enemies.filter(e => !e.dead);
+        if (this.enemies.length === 0) {
+          this.level++;
+          this.maxEnemies = Math.min(4 + Math.floor(this.level / 2), 10);
+          this.startLevel();
+          return;
+        }
+
+        this.enemySpawnTimer++;
+        if (this.enemySpawnTimer > 180) {
+          this.spawnEnemy();
+          this.enemySpawnTimer = 0;
+        }
+
+        this.updateUI();
+      }
+      draw() {
+        ctx.fillStyle = '#111';
+        ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+        ctx.strokeStyle = '#222';
+        ctx.lineWidth = 1;
+        for (let x = 0; x <= canvas.width; x += TILE) {
+          ctx.beginPath(); ctx.moveTo(x, 0); ctx.lineTo(x, canvas.height); ctx.stroke();
+        }
+        for (let y = 0; y <= canvas.height; y += TILE) {
+          ctx.beginPath(); ctx.moveTo(0, y); ctx.lineTo(canvas.width, y); ctx.stroke();
+        }
+
+        ctx.fillStyle = '#777';
+        for (const w of this.walls) {
+          ctx.fillRect(w.x, w.y, w.w, w.h);
+          ctx.strokeStyle = '#444';
+          ctx.strokeRect(w.x, w.y, w.w, w.h);
+        }
+
+        this.bullets.forEach(b => b.draw());
+        this.enemies.forEach(e => e.draw());
+        this.player?.draw();
+      }
+      loop() {
+        this.update();
+        this.draw();
+        requestAnimationFrame(this.loop);
+      }
+      updateUI() {
+        document.getElementById('score').textContent = this.score;
+        document.getElementById('lives').textContent = this.lives;
+        document.getElementById('level').textContent = this.level;
+      }
+      gameOver() {
+        this.running = false;
+        document.getElementById('finalScore').textContent = this.score;
+        document.getElementById('gameOver').style.display = 'block';
+      }
+      restart() {
+        this.score = 0;
+        this.lives = 3;
+        this.level = 1;
+        this.maxEnemies = 4;
+        this.running = true;
+        this.keys = {};
+        this.enemySpawnTimer = 0;
+        document.getElementById('gameOver').style.display = 'none';
+        this.startLevel();
+      }
+    }
+
+    const game = new Game();
+  </script>
+</body>
+</html>
